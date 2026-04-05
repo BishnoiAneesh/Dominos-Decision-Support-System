@@ -34,6 +34,10 @@ class Order:
         """Return the combined item count across all categories."""
         return self.main_items + self.side_items
 
+    def order_value(self, main_price: float, side_price: float) -> float:
+        """Return monetary value of the order based on item prices."""
+        return self.main_items * main_price + self.side_items * side_price
+
     def delivery_duration(self) -> float | None:
         """Return end-to-end time (minutes) from arrival to delivery."""
         if self.delivered_time is None:

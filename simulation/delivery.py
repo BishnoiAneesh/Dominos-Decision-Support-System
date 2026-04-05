@@ -91,6 +91,11 @@ def estimate_delivery_time(
     )
 
 
+def compute_delivery_cost(distance_km: float, cost_per_km: float) -> float:
+    """Return the monetary cost of a delivery given distance and per-km rate."""
+    return distance_km * cost_per_km
+
+
 def batch_estimate(
     origin: Point,
     destinations: list[Point],

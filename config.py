@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 @dataclass
 class SimulationConfig:
     """Top-level simulation controls."""
-    time_horizon_minutes: float = 180.0   # Total sim duration (e.g. 3-hour shift)
+    time_horizon_minutes: float = 480.0   # Total sim duration (e.g. 8-hour shift)
     random_seed: int | None = 42          # None = non-deterministic
 
 
@@ -28,7 +28,7 @@ class DemandConfig:
     'distribution' key lets the UI swap in alternate generators later.
     """
     distribution: str = "poisson"         # "poisson" | "uniform" | "custom"
-    poisson_lambda: float = 15.0           # Mean arrivals per minute
+    poisson_lambda: float = 5.0           # Mean arrivals per minute
     custom_params: dict = field(default_factory=dict)  # Reserved for non-Poisson params
 
 
@@ -42,12 +42,17 @@ class SLAConfig:
 @dataclass
 class PrepConfig:
     """
-    Store-side preparation rates.
-    Rates are in items-per-minute; durations are derived as 1/rate.
+    Store-side batch preparation capacity.
+
+    Orders are converted to equivalent items before scheduling:
+        effective_items = main_items + side_weight * side_items
+
+    A batch can hold up to `capacity_per_batch` equivalent items and
+    takes exactly `batch_time_minutes` to complete.
     """
-    main_item_prep_rate: float = 1.0      # Main items prepared per minute
-    side_item_prep_rate: float = 1.5      # Side items prepared per minute
-    prep_variance: float = 0.1            # Gaussian noise std-dev on prep time
+    capacity_per_batch: float = 10.0   # Max effective items processed per batch
+    batch_time_minutes: float = 8.0    # Fixed duration of one batch (minutes)
+    side_weight:        float = 0.75   # Conversion factor: sides → equivalent items
 
 
 @dataclass
@@ -64,6 +69,15 @@ class RandomnessConfig:
     demand_noise_std: float = 0.5         # Noise on inter-arrival times
     travel_time_noise_std: float = 1.0    # Extra variance on travel time (minutes)
     prep_time_noise_std: float = 0.2      # Extra variance on prep time (minutes)
+
+
+@dataclass
+class EconomicsConfig:
+    """Pricing and cost parameters for economic optimisation."""
+    main_item_price:    float = 8.0    # Revenue per main item (currency units)
+    side_item_price:    float = 3.0    # Revenue per side item (currency units)
+    cost_per_km:        float = 1.5    # Delivery cost per kilometre
+    sla_penalty_factor: float = 0.5    # Fraction of order value lost on SLA breach
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +101,7 @@ class SimConfig:
     prep:       PrepConfig        = field(default_factory=PrepConfig)
     delivery:   DeliveryConfig    = field(default_factory=DeliveryConfig)
     randomness: RandomnessConfig  = field(default_factory=RandomnessConfig)
+    economics:  EconomicsConfig   = field(default_factory=EconomicsConfig)
 
     # ------------------------------------------------------------------
     # UI-facing helper: build a SimConfig from flat key=value dicts,
@@ -101,6 +116,7 @@ class SimConfig:
         prep:       dict | None = None,
         delivery:   dict | None = None,
         randomness: dict | None = None,
+        economics:  dict | None = None,
     ) -> "SimConfig":
         """Construct a SimConfig from optional UI-supplied override dicts."""
         def _merge(dataclass_cls, overrides):
@@ -117,6 +133,7 @@ class SimConfig:
             prep       = _merge(PrepConfig,       prep),
             delivery   = _merge(DeliveryConfig,   delivery),
             randomness = _merge(RandomnessConfig, randomness),
+            economics  = _merge(EconomicsConfig,  economics),
         )
 
 

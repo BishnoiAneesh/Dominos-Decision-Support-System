@@ -1,87 +1,30 @@
 """
 store.py
 --------
-Defines the Store entity and its analytical time-estimation methods.
-No discrete event simulation here — only closed-form / queueing approximations.
+Defines the Store entity with batch-based capacity modelling.
+
+Capacity model
+--------------
+Orders are converted to equivalent items:
+    effective_items = main_items + side_weight * side_items
+
+The store processes items in fixed-size batches:
+    - Each batch holds up to `capacity_per_batch` equivalent items.
+    - Each batch takes exactly `batch_time_minutes` to complete.
+
+Queue state is tracked as a single float (`_workload`) — the total
+equivalent items currently ahead in the pipeline — rather than a list
+of order objects. This makes delay estimation O(1).
 """
 
 from __future__ import annotations
 
-from collections import deque
+import math
 from dataclasses import dataclass, field
-from typing import Deque, Protocol
 
 from config import PrepConfig
 from simulation.order import Order
 
-
-# ---------------------------------------------------------------------------
-# Queue model abstraction
-# ---------------------------------------------------------------------------
-
-class QueueModel(Protocol):
-    """Interface for pluggable queueing models (M/M/1, M/G/1, …)."""
-
-    def estimate_wait(
-        self,
-        queue: Deque[Order],
-        arrival_rate: float,
-        service_rate: float,
-    ) -> float: ...
-
-
-class SimpleQueueModel:
-    """Deterministic wait = total queued items / service_rate."""
-
-    def estimate_wait(
-        self,
-        queue: Deque[Order],
-        arrival_rate: float,
-        service_rate: float,
-    ) -> float:
-        if not queue:
-            return 0.0
-        total_items = sum(o.total_items() for o in queue)
-        return total_items / service_rate if service_rate > 0 else float("inf")
-
-
-class MM1QueueModel:
-    """M/M/1 approximation: Wq = λ / (μ(μ − λ))."""
-
-    def estimate_wait(
-        self,
-        queue: Deque[Order],
-        arrival_rate: float,
-        service_rate: float,
-    ) -> float:
-        rho = arrival_rate / service_rate if service_rate > 0 else float("inf")
-        if rho >= 1.0:
-            return float("inf")
-        return rho / (service_rate * (1.0 - rho))
-
-
-class MG1QueueModel:
-    """M/G/1 Pollaczek–Khinchine approximation."""
-
-    def __init__(self, service_time_cv: float = 1.0) -> None:
-        self.cv = service_time_cv
-
-    def estimate_wait(
-        self,
-        queue: Deque[Order],
-        arrival_rate: float,
-        service_rate: float,
-    ) -> float:
-        rho = arrival_rate / service_rate if service_rate > 0 else float("inf")
-        if rho >= 1.0:
-            return float("inf")
-        mean_service = 1.0 / service_rate
-        return (rho * mean_service * (1.0 + self.cv ** 2)) / (2.0 * (1.0 - rho))
-
-
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Store:
@@ -89,57 +32,104 @@ class Store:
     Represents a fulfilment store in the delivery network.
 
     Attributes:
-        id:           Unique store identifier.
-        location:     (x, y) coordinates of the store.
-        prep_config:  Prep rates sourced from SimConfig.
-        queue_model:  Pluggable queueing model for wait-time estimation.
+        id:          Unique store identifier.
+        location:    (x, y) coordinates of the store.
+        prep_config: Batch capacity parameters from SimConfig.
     """
 
     id:          int
     location:    tuple[float, float]
     prep_config: PrepConfig
-    queue_model: QueueModel        = field(default_factory=SimpleQueueModel)
-    _queue:      Deque[Order]      = field(default_factory=deque, init=False, repr=False)
+    _workload:   float = field(default=0.0, init=False, repr=False)
 
-    def enqueue(self, order: Order) -> None:
-        """Add an incoming order to the store queue."""
-        self._queue.append(order)
+    # ------------------------------------------------------------------
+    # Item conversion
+    # ------------------------------------------------------------------
 
-    def dequeue(self) -> Order | None:
-        """Remove and return the next order (FIFO)."""
-        return self._queue.popleft() if self._queue else None
+    def effective_items(self, order: Order) -> float:
+        """
+        Convert an order's item counts to a single equivalent-item value.
 
-    @property
-    def queue_length(self) -> int:
-        return len(self._queue)
+        effective_items = main_items + side_weight * side_items
+        """
+        return order.main_items + self.prep_config.side_weight * order.side_items
 
-    @property
-    def queue_snapshot(self) -> list[Order]:
-        return list(self._queue)
+    # ------------------------------------------------------------------
+    # Core estimation API
+    # ------------------------------------------------------------------
+
+    def estimate_queue_delay(self, order: Order) -> float:
+        """
+        Estimate waiting time before this order's batch begins (minutes).
+
+        Logic:
+            batches_ahead = ceil(workload_ahead / capacity_per_batch)
+            queue_delay   = batches_ahead * batch_time_minutes
+
+        The order's own items are NOT included in workload_ahead —
+        only items already committed to the pipeline count.
+        """
+        cfg = self.prep_config
+        if self._workload <= 0.0:
+            return 0.0
+        batches_ahead = math.ceil(self._workload / cfg.capacity_per_batch)
+        return batches_ahead * cfg.batch_time_minutes
 
     def estimate_prep_time(self, order: Order) -> float:
-        """Estimate preparation time for a single order (minutes)."""
-        cfg = self.prep_config
-        main_time = (
-            order.main_items / cfg.main_item_prep_rate
-            if cfg.main_item_prep_rate > 0 else float("inf")
-        )
-        side_time = (
-            order.side_items / cfg.side_item_prep_rate
-            if cfg.side_item_prep_rate > 0 else float("inf")
-        )
-        return main_time + side_time
+        """
+        Estimate preparation time for this order alone (minutes).
 
-    def estimate_queue_delay(self, arrival_rate: float) -> float:
-        """Estimate waiting time in queue before prep begins (minutes)."""
-        avg_items_per_order   = 2.0
-        effective_service_rate = self.prep_config.main_item_prep_rate / avg_items_per_order
-        return self.queue_model.estimate_wait(
-            queue        = self._queue,
-            arrival_rate = arrival_rate,
-            service_rate = effective_service_rate,
-        )
+        Logic:
+            own_batches = ceil(effective_items / capacity_per_batch)
+            prep_time   = own_batches * batch_time_minutes
+        """
+        cfg   = self.prep_config
+        items = self.effective_items(order)
+        own_batches = math.ceil(items / cfg.capacity_per_batch)
+        return own_batches * cfg.batch_time_minutes
 
-    def estimate_total_store_time(self, order: Order, arrival_rate: float) -> float:
-        """Queue delay + prep time (minutes)."""
-        return self.estimate_queue_delay(arrival_rate) + self.estimate_prep_time(order)
+    def estimate_total_store_time(self, order: Order) -> float:
+        """Queue delay + prep time for this order (minutes)."""
+        return self.estimate_queue_delay(order) + self.estimate_prep_time(order)
+
+    # ------------------------------------------------------------------
+    # Workload management
+    # ------------------------------------------------------------------
+
+    def add_order(self, order: Order) -> None:
+        """
+        Commit an order to the store pipeline.
+        Increments workload by the order's effective item count.
+        Call this after assignment is confirmed.
+        """
+        self._workload += self.effective_items(order)
+
+    def complete_order(self, order: Order) -> None:
+        """
+        Remove a completed order from the pipeline.
+        Decrements workload; clamps to zero to avoid floating-point drift.
+        """
+        self._workload = max(0.0, self._workload - self.effective_items(order))
+
+    # ------------------------------------------------------------------
+    # Inspection
+    # ------------------------------------------------------------------
+
+    @property
+    def current_workload(self) -> float:
+        """Total equivalent items currently in the pipeline."""
+        return self._workload
+
+    @property
+    def batches_in_progress(self) -> int:
+        """Number of batches needed to clear the current workload."""
+        if self._workload <= 0.0:
+            return 0
+        return math.ceil(self._workload / self.prep_config.capacity_per_batch)
+
+    def __repr__(self) -> str:
+        return (
+            f"Store(id={self.id}, location={self.location}, "
+            f"workload={self._workload:.1f} items, "
+            f"batches={self.batches_in_progress})"
+        )
