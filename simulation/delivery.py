@@ -50,26 +50,35 @@ def euclidean_distance(a: Point, b: Point) -> float:
 
 
 def estimate_delivery_time(
-    origin: Point,
-    destination: Point,
-    delivery_cfg: DeliveryConfig,
+    origin:         Point,
+    destination:    Point,
+    delivery_cfg:   DeliveryConfig,
     randomness_cfg: RandomnessConfig,
-    rng: np.random.Generator | None = None,
+    rng:            np.random.Generator | None = None,
+    graph:          object | None = None,
+    use_network_distance: bool = False,
 ) -> DeliveryEstimate:
     """
     Estimate delivery time between two points with distance-scaled noise.
 
     Args:
-        origin:          Departure point (store location).
-        destination:     Delivery point (order location).
-        delivery_cfg:    Speed and radius parameters.
-        randomness_cfg:  Noise controls.
-        rng:             Optional numpy Generator for a stochastic sample.
+        origin:               Departure point (store location) as (lat, lon) or (x, y).
+        destination:          Delivery point (order location).
+        delivery_cfg:         Speed and radius parameters.
+        randomness_cfg:       Noise controls.
+        rng:                  Optional numpy Generator for a stochastic sample.
+        graph:                OSMnx MultiDiGraph for road-network routing.
+                              Required when use_network_distance=True.
+        use_network_distance: If True, use shortest road-network path distance.
+                              Falls back to Euclidean if graph is None.
 
     Returns:
         DeliveryEstimate with expected_time, variance, and distance_km.
     """
-    distance_km = euclidean_distance(origin, destination)
+    if use_network_distance and graph is not None:
+        distance_km = network_distance_km(origin, destination, graph)
+    else:
+        distance_km = euclidean_distance(origin, destination)
     speed_kmpm  = delivery_cfg.average_speed_kmph / 60.0
     base_time   = distance_km / speed_kmpm if speed_kmpm > 0 else float("inf")
 
@@ -94,6 +103,47 @@ def estimate_delivery_time(
 def compute_delivery_cost(distance_km: float, cost_per_km: float) -> float:
     """Return the monetary cost of a delivery given distance and per-km rate."""
     return distance_km * cost_per_km
+
+
+def network_distance_km(
+    origin:      Point,
+    destination: Point,
+    graph:       object,
+) -> float:
+    """
+    Compute shortest-path road distance (km) between two (lat, lon) points.
+
+    Uses OSMnx to snap both points to the nearest road nodes, then queries
+    the shortest weighted path via NetworkX.
+
+    Args:
+        origin:      (lat, lon) of the departure point.
+        destination: (lat, lon) of the delivery address.
+        graph:       Pre-loaded OSMnx MultiDiGraph.
+
+    Returns:
+        Road distance in kilometres. Falls back to Euclidean distance if
+        no path exists between the snapped nodes.
+    """
+    try:
+        import osmnx as ox
+        import networkx as nx
+    except ImportError as e:
+        raise ImportError("OSMnx and NetworkX are required for network routing.") from e
+
+    # ox.nearest_nodes expects (X=lon, Y=lat)
+    orig_node = ox.nearest_nodes(graph, origin[1],      origin[0])
+    dest_node = ox.nearest_nodes(graph, destination[1], destination[0])
+
+    if orig_node == dest_node:
+        return 0.0
+
+    try:
+        length_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="length")
+        return length_m / 1000.0
+    except nx.NetworkXNoPath:
+        # Fallback to Euclidean if graph is disconnected at these nodes
+        return euclidean_distance(origin, destination)
 
 
 def batch_estimate(

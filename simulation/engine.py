@@ -121,11 +121,13 @@ class SimulationEngine:
         stores:        List[Store],
         strategy:      AssignmentStrategy | None = None,
         demand_config: DemandGeneratorConfig | None = None,
+        graph:         object | None = None,
     ) -> None:
         self.config         = config
         self.stores         = stores
-        self.strategy       = strategy or OptimizedStrategy()
+        self.strategy       = strategy or OptimizedStrategy(graph=graph)
         self._demand_config = demand_config or DemandGeneratorConfig.from_sim_config(config)
+        self._graph         = graph   # OSMnx graph; None in Euclidean mode
 
     def run(self, orders: List[Order] | None = None) -> SimulationResult:
         """
@@ -219,6 +221,7 @@ def run_simulation(
     store_locations: List[tuple[float, float]],
     strategy:        AssignmentStrategy | None = None,
     demand_config:   DemandGeneratorConfig | None = None,
+    graph:           object | None = None,
 ) -> SimulationResult:
     """
     Build stores and run one simulation with the given strategy.
@@ -228,6 +231,7 @@ def run_simulation(
         store_locations:  (x, y) coordinates for each store.
         strategy:         Assignment strategy. Defaults to OptimizedStrategy.
         demand_config:    Optional demand override (UI-supplied).
+        graph:            OSMnx MultiDiGraph for road-network mode. None = Euclidean.
 
     Example::
 
@@ -240,6 +244,7 @@ def run_simulation(
         stores        = stores,
         strategy      = strategy,
         demand_config = demand_config,
+        graph         = graph,
     ).run()
 
 
@@ -248,6 +253,7 @@ def compare_strategies(
     store_locations: List[tuple[float, float]],
     strategies:      List[AssignmentStrategy] | None = None,
     demand_config:   DemandGeneratorConfig | None = None,
+    graph:           object | None = None,
 ) -> ComparisonResult:
     """
     Run the simulation once per strategy on identical demand, then
@@ -274,7 +280,7 @@ def compare_strategies(
         print(result.best_speed().strategy_name)
     """
     if strategies is None:
-        strategies = [NearestStoreStrategy(), OptimizedStrategy()]
+        strategies = [NearestStoreStrategy(graph=graph), OptimizedStrategy(graph=graph)]
 
     # Generate demand once — shared across all strategy runs
     demand_cfg  = demand_config or DemandGeneratorConfig.from_sim_config(config)
@@ -287,7 +293,7 @@ def compare_strategies(
         stores  = _build_stores(config, store_locations)
         # Deep-copy orders so timestamp fields don't bleed across runs
         orders  = copy.deepcopy(shared_orders)
-        engine  = SimulationEngine(config=config, stores=stores, strategy=strategy)
+        engine  = SimulationEngine(config=config, stores=stores, strategy=strategy, graph=graph)
         result  = engine.run(orders=orders)
         full_results.append(result)
 

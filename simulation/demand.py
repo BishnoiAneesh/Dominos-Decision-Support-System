@@ -120,6 +120,35 @@ class GaussianLocationSampler(LocationSampler):
         return rng.normal(loc=self.centre, scale=self.std_dev, size=(n, 2))
 
 
+class RoadNetworkLocationSampler(LocationSampler):
+    """
+    Samples delivery locations uniformly along real road edges.
+
+    Requires OSMnx and a loaded graph (from geo.map_loader.load_city_graph).
+    Edges are extracted once at construction time for performance.
+
+    Args:
+        graph: OSMnx MultiDiGraph (pass the cached singleton from map_loader).
+    """
+
+    def __init__(self, graph: object) -> None:
+        from geo.road_sampler import extract_edges
+        self._graph = graph
+        self._edges = extract_edges(graph)
+
+    def sample(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        from geo.road_sampler import sample_point_on_edge
+        points = [
+            sample_point_on_edge(
+                self._edges[int(rng.integers(0, len(self._edges)))],
+                self._graph,
+                rng,
+            )
+            for _ in range(n)
+        ]
+        return np.array(points, dtype=float)   # shape (n, 2): col 0=lat, col 1=lon
+
+
 # ---------------------------------------------------------------------------
 # Item count samplers
 # ---------------------------------------------------------------------------
@@ -159,8 +188,9 @@ ARRIVAL_REGISTRY: dict[str, type[ArrivalProcess]] = {
 }
 
 LOCATION_REGISTRY: dict[str, type[LocationSampler]] = {
-    "uniform":  UniformLocationSampler,
-    "gaussian": GaussianLocationSampler,
+    "uniform":    UniformLocationSampler,
+    "gaussian":   GaussianLocationSampler,
+    "road_network": RoadNetworkLocationSampler,
 }
 
 ITEM_REGISTRY: dict[str, type[ItemCountSampler]] = {
@@ -184,6 +214,7 @@ class DemandGeneratorConfig:
     item_sampler:     ItemCountSampler = field(default_factory=PoissonItemSampler)
     time_horizon:     float            = 480.0
     seed:             int | None       = 42
+    use_real_map:     bool             = False   # If True, location_sampler must be RoadNetworkLocationSampler
 
     @classmethod
     def from_ui_inputs(
@@ -221,6 +252,53 @@ class DemandGeneratorConfig:
             item_sampler     = _build(ITEM_REGISTRY,     item_type,     item_params),
             time_horizon     = time_horizon,
             seed             = seed,
+        )
+
+    @classmethod
+    def from_real_map(
+        cls,
+        graph:          object,
+        arrival_type:   str            = "poisson",
+        arrival_params: dict | None    = None,
+        item_type:      str            = "poisson",
+        item_params:    dict | None    = None,
+        time_horizon:   float          = 480.0,
+        seed:           int | None     = 42,
+    ) -> "DemandGeneratorConfig":
+        """
+        Build a DemandGeneratorConfig that samples order locations from a
+        real road-network graph.
+
+        Args:
+            graph:          Pre-loaded OSMnx MultiDiGraph (use load_city_graph()).
+            arrival_type:   Arrival process key (e.g. "poisson").
+            arrival_params: Parameters for the arrival process.
+            item_type:      Item count sampler key.
+            item_params:    Parameters for the item sampler.
+            time_horizon:   Simulation duration (minutes).
+            seed:           RNG seed.
+
+        Example::
+
+            from geo.map_loader import load_city_graph
+            from simulation.demand import DemandGeneratorConfig
+
+            G   = load_city_graph()
+            cfg = DemandGeneratorConfig.from_real_map(G, arrival_params={"lam": 2.0})
+        """
+        def _build(registry, key, params):
+            cls_ = registry.get(key)
+            if cls_ is None:
+                raise ValueError(f"Unknown strategy '{key}'. Choose from: {list(registry)}")
+            return cls_(**(params or {}))
+
+        return cls(
+            arrival_process  = _build(ARRIVAL_REGISTRY, arrival_type, arrival_params),
+            location_sampler = RoadNetworkLocationSampler(graph),
+            item_sampler     = _build(ITEM_REGISTRY, item_type, item_params),
+            time_horizon     = time_horizon,
+            seed             = seed,
+            use_real_map     = True,
         )
 
     @classmethod

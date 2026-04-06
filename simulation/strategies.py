@@ -34,20 +34,24 @@ def _full_evaluation(
     store:             Store,
     config:            SimConfig,
     assignment_cost:   float = 0.0,
+    graph:             object | None = None,
 ) -> StoreEvaluation:
     """
     Compute a complete StoreEvaluation for one (order, store) pair.
     assignment_cost is passed in by the calling strategy so each strategy
     can use its own objective without duplicating the pipeline logic.
+    graph is the optional OSMnx MultiDiGraph for road-network distance.
     """
     queue_delay  = store.estimate_queue_delay(order, order.arrival_time)
     prep_time    = store.estimate_prep_time(order)
     delivery_est = estimate_delivery_time(
-        origin         = store.location,
-        destination    = order.location,
-        delivery_cfg   = config.delivery,
-        randomness_cfg = config.randomness,
-        rng            = None,
+        origin                = store.location,
+        destination           = order.location,
+        delivery_cfg          = config.delivery,
+        randomness_cfg        = config.randomness,
+        rng                   = None,
+        graph                 = graph,
+        use_network_distance  = config.delivery.use_network_distance,
     )
 
     expected_total = queue_delay + prep_time + delivery_est.expected_time
@@ -130,7 +134,13 @@ class NearestStoreStrategy(AssignmentStrategy):
     """
     Selects the store with minimum Euclidean distance to the order.
     Full pipeline metrics are computed after selection for accurate reporting.
+
+    Args:
+        graph: Optional OSMnx MultiDiGraph for road-network distance.
     """
+
+    def __init__(self, graph: object | None = None) -> None:
+        self._graph = graph
 
     def select_store(
         self,
@@ -144,7 +154,7 @@ class NearestStoreStrategy(AssignmentStrategy):
         nearest = min(stores, key=lambda s: _distance_to(s, order))
 
         evaluations = [
-            _full_evaluation(order, s, config, assignment_cost=_distance_to(s, order))
+            _full_evaluation(order, s, config, assignment_cost=_distance_to(s, order), graph=self._graph)
             for s in stores
         ]
         selected_ev = next(e for e in evaluations if e.store.id == nearest.id)
@@ -181,8 +191,10 @@ class OptimizedStrategy(AssignmentStrategy):
     def __init__(
         self,
         probability_model: SLAProbabilityModel | None = None,
+        graph:             object | None = None,
     ) -> None:
         self.probability_model = probability_model or NormalSLAModel()
+        self._graph            = graph
 
     def select_store(
         self,
@@ -201,7 +213,7 @@ class OptimizedStrategy(AssignmentStrategy):
             distance_km = _distance_to(store, order)
 
             # Compute pipeline metrics first (needed for p_sla)
-            ev = _full_evaluation(order, store, config, assignment_cost=0.0)
+            ev = _full_evaluation(order, store, config, assignment_cost=0.0, graph=self._graph)
 
             # Economic objective
             delivery_cost    = compute_delivery_cost(distance_km, eco.cost_per_km)

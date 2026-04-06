@@ -1,40 +1,51 @@
 """
 main.py
 -------
-Runs a strategy comparison and prints a side-by-side summary.
+Runs a strategy comparison using real road-network demand.
 """
 
 from config import SimConfig
 from simulation.demand import DemandGeneratorConfig
 from simulation.engine import compare_strategies
+from geo.map_loader import load_city_graph
 
 
 def main() -> None:
     # --- Config ---
     config = SimConfig()
     config.simulation.time_horizon_minutes = 180.0
-    config.demand.poisson_lambda           = 0.8
+    config.demand.poisson_lambda           = 0.6
     config.sla.max_delivery_minutes        = 30.0
     config.sla.probability_threshold       = 0.95
 
-    store_locations = [(3.0, 3.0), (6.0, 9.0), (8.0, 4.0)]
+    # Use real road distances
+    config.delivery.use_network_distance = True
 
-    demand_config = DemandGeneratorConfig.from_ui_inputs(
-        arrival_type    = "poisson",
-        arrival_params  = {"lam": config.demand.poisson_lambda},
-        location_type   = "gaussian",
-        location_params = {"centre": (5.0, 5.0), "std_dev": 2.5},
-        item_type       = "poisson",
-        item_params     = {"main_lam": 2.0, "side_lam": 3.0},
-        time_horizon    = config.simulation.time_horizon_minutes,
-        seed            = config.simulation.random_seed,
+    # --- Load map (cached after first run) ---
+    print("Loading map...")
+    G = load_city_graph()
+
+    # --- Store locations (lat, lon within bounding box) ---
+    store_locations = [
+        (28.54, 77.39),
+        (28.53, 77.40),
+        (28.52, 77.38),
+    ]
+
+    # --- Real-map demand generation ---
+    demand_config = DemandGeneratorConfig.from_real_map(
+        graph         = G,
+        arrival_params= {"lam": config.demand.poisson_lambda},
+        time_horizon  = config.simulation.time_horizon_minutes,
+        seed          = config.simulation.random_seed,
     )
 
-    # --- Run comparison (both strategies, same demand) ---
+    # --- Run comparison ---
     comparison = compare_strategies(
         config          = config,
         store_locations = store_locations,
         demand_config   = demand_config,
+        graph           = G,   # VERY IMPORTANT
     )
 
     # --- Print summary ---

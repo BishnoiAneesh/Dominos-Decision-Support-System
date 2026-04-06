@@ -58,9 +58,10 @@ class PrepConfig:
 @dataclass
 class DeliveryConfig:
     """Courier movement and delivery parameters."""
-    average_speed_kmph: float = 20.0      # Average courier speed
-    speed_variance: float = 2.0           # Std-dev of speed (kmph)
+    average_speed_kmph:    float = 20.0   # Average courier speed
+    speed_variance:        float = 2.0    # Std-dev of speed (kmph)
     max_delivery_radius_km: float = 5.0   # Hard cap on delivery zone radius
+    use_network_distance:  bool  = False  # Use road-network routing instead of Euclidean
 
 
 @dataclass
