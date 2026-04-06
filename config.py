@@ -4,6 +4,9 @@ config.py
 Central configuration for the stochastic last-mile delivery simulation.
 All parameters are grouped by concern and can be overridden dynamically
 (e.g. from a Streamlit UI) by passing updated dicts to SimConfig.
+
+NOTE: All distance calculations are road-network-based (OSMnx).
+Euclidean / straight-line distance is not used anywhere in this system.
 """
 
 from dataclasses import dataclass, field
@@ -57,11 +60,12 @@ class PrepConfig:
 
 @dataclass
 class DeliveryConfig:
-    """Courier movement and delivery parameters."""
-    average_speed_kmph:    float = 20.0   # Average courier speed
-    speed_variance:        float = 2.0    # Std-dev of speed (kmph)
-    max_delivery_radius_km: float = 5.0   # Hard cap on delivery zone radius
-    use_network_distance:  bool  = False  # Use road-network routing instead of Euclidean
+    """
+    Courier movement and delivery parameters.
+    Distance is always computed from the road-network graph.
+    """
+    average_speed_kmph: float = 20.0   # Average courier speed
+    speed_variance:     float = 2.0    # Std-dev of speed (kmph)
 
 
 @dataclass

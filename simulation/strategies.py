@@ -3,6 +3,13 @@ strategies.py
 -------------
 Assignment strategy hierarchy for store selection.
 
+All distance calculations use precomputed road-network distances
+(StoreDistanceIndex from simulation.delivery).
+There is NO Euclidean / straight-line distance anywhere in this module.
+
+The engine calls ``strategy.set_distance_index(index)`` once after
+precomputation, before the order-processing loop begins.
+
 Extend by subclassing AssignmentStrategy and implementing select_store().
 Register new strategies in STRATEGY_REGISTRY for UI dropdown support.
 """
@@ -15,7 +22,12 @@ from typing import List
 from config import SimConfig
 from simulation.order import Order
 from simulation.store import Store
-from simulation.delivery import estimate_delivery_time, euclidean_distance, compute_delivery_cost
+from simulation.delivery import (
+    estimate_delivery_time,
+    compute_delivery_cost,
+    StoreDistanceIndex,
+    _nearest_node,
+)
 from simulation.assignment_types import AssignmentResult, StoreEvaluation
 from models.probability import (
     prob_within_sla,
@@ -30,34 +42,36 @@ from models.probability import (
 # ---------------------------------------------------------------------------
 
 def _full_evaluation(
-    order:             Order,
-    store:             Store,
-    config:            SimConfig,
-    assignment_cost:   float = 0.0,
-    graph:             object | None = None,
+    order:                Order,
+    store:                Store,
+    config:               SimConfig,
+    graph:                object,
+    store_node_distances: StoreDistanceIndex,
+    assignment_cost:      float = 0.0,
 ) -> StoreEvaluation:
     """
     Compute a complete StoreEvaluation for one (order, store) pair.
-    assignment_cost is passed in by the calling strategy so each strategy
-    can use its own objective without duplicating the pipeline logic.
-    graph is the optional OSMnx MultiDiGraph for road-network distance.
+
+    All distances come from the precomputed ``store_node_distances`` index.
+    The ``assignment_cost`` field is injected by the calling strategy so
+    each strategy can define its own objective without duplicating the
+    pipeline logic here.
     """
     queue_delay  = store.estimate_queue_delay(order, order.arrival_time)
     prep_time    = store.estimate_prep_time(order)
     delivery_est = estimate_delivery_time(
-        origin                = store.location,
-        destination           = order.location,
-        delivery_cfg          = config.delivery,
-        randomness_cfg        = config.randomness,
-        rng                   = None,
-        graph                 = graph,
-        use_network_distance  = config.delivery.use_network_distance,
+        origin_store_id      = store.id,
+        destination          = order.location,
+        delivery_cfg         = config.delivery,
+        randomness_cfg       = config.randomness,
+        graph                = graph,
+        store_node_distances = store_node_distances,
     )
 
     expected_total = queue_delay + prep_time + delivery_est.expected_time
     total_variance = delivery_est.variance
 
-    p_sla = prob_within_sla(
+    p_sla   = prob_within_sla(
         expected_time = expected_total,
         variance      = total_variance,
         sla_threshold = config.sla.max_delivery_minutes,
@@ -79,11 +93,28 @@ def _full_evaluation(
         sla_probability  = p_sla,
         meets_sla_target = sla_met,
         assignment_cost  = assignment_cost,
+        # Stash distance_km on the evaluation for the economic objective
+        # by re-using delivery_est.distance_km via a helper below
     )
 
 
-def _distance_to(store: Store, order: Order) -> float:
-    return euclidean_distance(store.location, order.location)
+def _road_distance_km(
+    store:                Store,
+    order:                Order,
+    graph:                object,
+    store_node_distances: StoreDistanceIndex,
+) -> float:
+    """
+    O(1) road-network distance lookup (km) from a store to an order location.
+
+    Uses the precomputed Dijkstra index — no shortest-path query at call time.
+    """
+    dest_node  = _nearest_node(graph, order.location[0], order.location[1])
+    node_dists = store_node_distances.get(store.id, {})
+    distance_m = node_dists.get(dest_node)
+    if distance_m is None:
+        distance_m = max(node_dists.values()) if node_dists else 0.0
+    return distance_m / 1000.0
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +124,19 @@ def _distance_to(store: Store, order: Order) -> float:
 class AssignmentStrategy(ABC):
     """
     Base class for all store-assignment strategies.
-    Subclasses implement select_store() and return a fully populated
-    AssignmentResult. The engine calls this once per order.
+
+    The engine injects the precomputed distance index via
+    ``set_distance_index()`` once before the simulation loop, so strategies
+    never need to trigger shortest-path computation themselves.
     """
+
+    def __init__(self, graph: object) -> None:
+        self._graph:          object             = graph
+        self._distance_index: StoreDistanceIndex = {}
+
+    def set_distance_index(self, index: StoreDistanceIndex) -> None:
+        """Called once by the engine after ``precompute_store_distances()``."""
+        self._distance_index = index
 
     @property
     def name(self) -> str:
@@ -127,20 +168,20 @@ class AssignmentStrategy(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Strategy 1 — Nearest Store (baseline, unchanged)
+# Strategy 1 — Nearest Store (baseline)
 # ---------------------------------------------------------------------------
 
 class NearestStoreStrategy(AssignmentStrategy):
     """
-    Selects the store with minimum Euclidean distance to the order.
-    Full pipeline metrics are computed after selection for accurate reporting.
+    Selects the store with the shortest road-network distance to the order.
 
-    Args:
-        graph: Optional OSMnx MultiDiGraph for road-network distance.
+    Selection uses the O(1) precomputed distance lookup.
+    Full pipeline metrics are computed for all stores after selection so
+    the AssignmentResult carries complete diagnostics.
     """
 
-    def __init__(self, graph: object | None = None) -> None:
-        self._graph = graph
+    def __init__(self, graph: object) -> None:
+        super().__init__(graph)
 
     def select_store(
         self,
@@ -151,10 +192,22 @@ class NearestStoreStrategy(AssignmentStrategy):
         if not stores:
             raise ValueError("NearestStoreStrategy requires at least one store.")
 
-        nearest = min(stores, key=lambda s: _distance_to(s, order))
+        nearest = min(
+            stores,
+            key=lambda s: _road_distance_km(s, order, self._graph, self._distance_index),
+        )
 
         evaluations = [
-            _full_evaluation(order, s, config, assignment_cost=_distance_to(s, order), graph=self._graph)
+            _full_evaluation(
+                order                = order,
+                store                = s,
+                config               = config,
+                graph                = self._graph,
+                store_node_distances = self._distance_index,
+                assignment_cost      = _road_distance_km(
+                    s, order, self._graph, self._distance_index
+                ),
+            )
             for s in stores
         ]
         selected_ev = next(e for e in evaluations if e.store.id == nearest.id)
@@ -183,18 +236,15 @@ class OptimizedStrategy(AssignmentStrategy):
 
     Filters to stores where P(SLA) >= probability_threshold first.
     Falls back to highest P(SLA) if no store meets the threshold.
-
-    Args:
-        probability_model: Pluggable SLA probability backend.
     """
 
     def __init__(
         self,
+        graph:             object,
         probability_model: SLAProbabilityModel | None = None,
-        graph:             object | None = None,
     ) -> None:
+        super().__init__(graph)
         self.probability_model = probability_model or NormalSLAModel()
-        self._graph            = graph
 
     def select_store(
         self,
@@ -205,22 +255,28 @@ class OptimizedStrategy(AssignmentStrategy):
         if not stores:
             raise ValueError("OptimizedStrategy requires at least one store.")
 
-        eco = config.economics
+        eco   = config.economics
         value = order.order_value(eco.main_item_price, eco.side_item_price)
 
         evaluations = []
         for store in stores:
-            distance_km = _distance_to(store, order)
+            distance_km = _road_distance_km(
+                store, order, self._graph, self._distance_index
+            )
 
-            # Compute pipeline metrics first (needed for p_sla)
-            ev = _full_evaluation(order, store, config, assignment_cost=0.0, graph=self._graph)
+            ev = _full_evaluation(
+                order                = order,
+                store                = store,
+                config               = config,
+                graph                = self._graph,
+                store_node_distances = self._distance_index,
+                assignment_cost      = 0.0,   # will be replaced below
+            )
 
-            # Economic objective
             delivery_cost    = compute_delivery_cost(distance_km, eco.cost_per_km)
             expected_penalty = (1.0 - ev.sla_probability) * eco.sla_penalty_factor * value
             objective        = delivery_cost + expected_penalty
 
-            # Re-attach objective as assignment_cost
             evaluations.append(StoreEvaluation(
                 store            = ev.store,
                 queue_delay      = ev.queue_delay,

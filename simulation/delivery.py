@@ -1,22 +1,45 @@
 """
 delivery.py
 -----------
-Analytical delivery time estimation with configurable stochastic noise.
-Returns both expected time and variance to support downstream probability modelling.
+Road-network delivery time estimation backed by precomputed Dijkstra distances.
+
+All distance calculations are purely graph-based (OSMnx + NetworkX).
+There is NO Euclidean fallback anywhere in this module.
+
+Precomputed distances
+---------------------
+Call ``precompute_store_distances(stores, graph)`` once before the simulation
+loop.  It runs ``networkx.single_source_dijkstra_path_length`` from each
+store's nearest road node and stores the result as:
+
+    StoreDistanceIndex = Dict[store_id, Dict[node_id, distance_metres]]
+
+Pass the returned index into ``estimate_delivery_time()`` via the
+``store_node_distances`` argument.  Per-order distance lookups then become
+an O(1) dict access rather than a full shortest-path query.
 """
 
 from __future__ import annotations
 
 import math
-import numpy as np
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, List, Tuple
+
+import numpy as np
 
 from config import DeliveryConfig, RandomnessConfig
 
 
 Point = Tuple[float, float]
 
+# Type aliases
+NodeDistances      = Dict[int, float]          # node_id  → distance in metres
+StoreDistanceIndex = Dict[int, NodeDistances]  # store_id → NodeDistances
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class DeliveryEstimate:
@@ -26,7 +49,7 @@ class DeliveryEstimate:
     Attributes:
         expected_time:  E[T] — mean delivery duration (minutes).
         variance:       Var[T] — variance of delivery duration (minutes²).
-        distance_km:    Euclidean distance between origin and destination.
+        distance_km:    Road-network distance between origin and destination (km).
     """
     expected_time: float
     variance:      float
@@ -44,41 +67,114 @@ class DeliveryEstimate:
         return float(norm.cdf(sla_minutes, loc=self.expected_time, scale=self.std_dev))
 
 
-def euclidean_distance(a: Point, b: Point) -> float:
-    """Euclidean distance between two (x, y) coordinate pairs."""
-    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+# ---------------------------------------------------------------------------
+# Node snapping (internal helper)
+# ---------------------------------------------------------------------------
+
+def _nearest_node(graph: object, lat: float, lon: float) -> int:
+    """Return the id of the OSMnx graph node nearest to (lat, lon)."""
+    try:
+        import osmnx as ox
+    except ImportError as exc:
+        raise ImportError(
+            "OSMnx is required for road-network delivery estimation. "
+            "Install it with: pip install osmnx"
+        ) from exc
+    # ox.nearest_nodes expects (X=lon, Y=lat)
+    return int(ox.nearest_nodes(graph, lon, lat))
 
 
-def estimate_delivery_time(
-    origin:         Point,
-    destination:    Point,
-    delivery_cfg:   DeliveryConfig,
-    randomness_cfg: RandomnessConfig,
-    rng:            np.random.Generator | None = None,
-    graph:          object | None = None,
-    use_network_distance: bool = False,
-) -> DeliveryEstimate:
+# ---------------------------------------------------------------------------
+# Precomputation
+# ---------------------------------------------------------------------------
+
+def precompute_store_distances(
+    stores: list,   # List[Store] — string annotation avoids circular import
+    graph:  object,
+) -> StoreDistanceIndex:
     """
-    Estimate delivery time between two points with distance-scaled noise.
+    Run single-source Dijkstra from each store node and cache all results.
+
+    This is the **only** place shortest-path computation happens.
+    The returned index is passed to ``estimate_delivery_time()`` so that
+    every subsequent distance lookup is a simple dict ``get()``.
 
     Args:
-        origin:               Departure point (store location) as (lat, lon) or (x, y).
-        destination:          Delivery point (order location).
-        delivery_cfg:         Speed and radius parameters.
+        stores: List of Store objects (need ``.id`` and ``.location``).
+        graph:  OSMnx MultiDiGraph with ``'length'`` edge weights (metres).
+
+    Returns:
+        ``{store_id: {node_id: distance_metres, ...}, ...}``
+
+    Raises:
+        ImportError: If NetworkX or OSMnx is not installed.
+    """
+    try:
+        import networkx as nx
+    except ImportError as exc:
+        raise ImportError(
+            "NetworkX is required for distance precomputation. "
+            "Install it with: pip install networkx"
+        ) from exc
+
+    index: StoreDistanceIndex = {}
+    for store in stores:
+        lat, lon   = store.location
+        store_node = _nearest_node(graph, lat, lon)
+        distances  = nx.single_source_dijkstra_path_length(
+            graph, store_node, weight="length"
+        )
+        # nx returns a generator-like dict; materialise it once
+        index[store.id] = dict(distances)
+    return index
+
+
+# ---------------------------------------------------------------------------
+# Core estimator
+# ---------------------------------------------------------------------------
+
+def estimate_delivery_time(
+    origin_store_id:      int,
+    destination:          Point,
+    delivery_cfg:         DeliveryConfig,
+    randomness_cfg:       RandomnessConfig,
+    graph:                object,
+    store_node_distances: StoreDistanceIndex,
+    rng:                  np.random.Generator | None = None,
+) -> DeliveryEstimate:
+    """
+    Estimate delivery time using a precomputed road-network distance index.
+
+    Args:
+        origin_store_id:      ID of the dispatching store.
+        destination:          (lat, lon) of the delivery address.
+        delivery_cfg:         Speed and variance parameters.
         randomness_cfg:       Noise controls.
+        graph:                OSMnx MultiDiGraph — used only to snap the
+                              destination to its nearest road node.
+        store_node_distances: Output of ``precompute_store_distances()``.
         rng:                  Optional numpy Generator for a stochastic sample.
-        graph:                OSMnx MultiDiGraph for road-network routing.
-                              Required when use_network_distance=True.
-        use_network_distance: If True, use shortest road-network path distance.
-                              Falls back to Euclidean if graph is None.
+                              When provided, ``expected_time`` is a single draw
+                              from Normal(base_time, noise_std); otherwise it
+                              equals the deterministic base_time.
 
     Returns:
         DeliveryEstimate with expected_time, variance, and distance_km.
+
+    Notes:
+        If the destination node is unreachable from the store node (graph
+        disconnected), the maximum known distance for that store is used as a
+        conservative upper bound so the simulation degrades gracefully.
     """
-    if use_network_distance and graph is not None:
-        distance_km = network_distance_km(origin, destination, graph)
-    else:
-        distance_km = euclidean_distance(origin, destination)
+    dest_node  = _nearest_node(graph, destination[0], destination[1])
+    node_dists = store_node_distances[origin_store_id]
+
+    distance_m = node_dists.get(dest_node)
+    if distance_m is None:
+        # Conservative fallback for disconnected nodes
+        distance_m = max(node_dists.values()) if node_dists else 0.0
+
+    distance_km = distance_m / 1000.0
     speed_kmpm  = delivery_cfg.average_speed_kmph / 60.0
     base_time   = distance_km / speed_kmpm if speed_kmpm > 0 else float("inf")
 
@@ -100,61 +196,38 @@ def estimate_delivery_time(
     )
 
 
+# ---------------------------------------------------------------------------
+# Economic helper
+# ---------------------------------------------------------------------------
+
 def compute_delivery_cost(distance_km: float, cost_per_km: float) -> float:
     """Return the monetary cost of a delivery given distance and per-km rate."""
     return distance_km * cost_per_km
 
 
-def network_distance_km(
-    origin:      Point,
-    destination: Point,
-    graph:       object,
-) -> float:
-    """
-    Compute shortest-path road distance (km) between two (lat, lon) points.
-
-    Uses OSMnx to snap both points to the nearest road nodes, then queries
-    the shortest weighted path via NetworkX.
-
-    Args:
-        origin:      (lat, lon) of the departure point.
-        destination: (lat, lon) of the delivery address.
-        graph:       Pre-loaded OSMnx MultiDiGraph.
-
-    Returns:
-        Road distance in kilometres. Falls back to Euclidean distance if
-        no path exists between the snapped nodes.
-    """
-    try:
-        import osmnx as ox
-        import networkx as nx
-    except ImportError as e:
-        raise ImportError("OSMnx and NetworkX are required for network routing.") from e
-
-    # ox.nearest_nodes expects (X=lon, Y=lat)
-    orig_node = ox.nearest_nodes(graph, origin[1],      origin[0])
-    dest_node = ox.nearest_nodes(graph, destination[1], destination[0])
-
-    if orig_node == dest_node:
-        return 0.0
-
-    try:
-        length_m = nx.shortest_path_length(graph, orig_node, dest_node, weight="length")
-        return length_m / 1000.0
-    except nx.NetworkXNoPath:
-        # Fallback to Euclidean if graph is disconnected at these nodes
-        return euclidean_distance(origin, destination)
-
+# ---------------------------------------------------------------------------
+# Batch helper
+# ---------------------------------------------------------------------------
 
 def batch_estimate(
-    origin: Point,
-    destinations: list[Point],
-    delivery_cfg: DeliveryConfig,
-    randomness_cfg: RandomnessConfig,
-    rng: np.random.Generator | None = None,
-) -> list[DeliveryEstimate]:
-    """Estimate delivery times from one origin to multiple destinations."""
+    origin_store_id:      int,
+    destinations:         List[Point],
+    delivery_cfg:         DeliveryConfig,
+    randomness_cfg:       RandomnessConfig,
+    graph:                object,
+    store_node_distances: StoreDistanceIndex,
+    rng:                  np.random.Generator | None = None,
+) -> List[DeliveryEstimate]:
+    """Estimate delivery times from one store origin to multiple destinations."""
     return [
-        estimate_delivery_time(origin, dest, delivery_cfg, randomness_cfg, rng)
+        estimate_delivery_time(
+            origin_store_id      = origin_store_id,
+            destination          = dest,
+            delivery_cfg         = delivery_cfg,
+            randomness_cfg       = randomness_cfg,
+            graph                = graph,
+            store_node_distances = store_node_distances,
+            rng                  = rng,
+        )
         for dest in destinations
     ]

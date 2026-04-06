@@ -4,10 +4,15 @@ engine.py
 Simulation orchestrator for the last-mile delivery system.
 Runs a sequential event loop: demand generation → assignment → metrics.
 
+Speed-up: road-network distances from every store to every graph node are
+precomputed once via ``precompute_store_distances()`` before the order loop
+starts.  The resulting StoreDistanceIndex is injected into each strategy
+so per-order lookups are O(1) dict accesses.
+
 Key entry points
 ----------------
-run_simulation(config, store_locations, strategy)  → SimulationResult
-compare_strategies(config, store_locations, ...)   → ComparisonResult
+run_simulation(config, store_locations, graph, strategy)  → SimulationResult
+compare_strategies(config, store_locations, graph, ...)   → ComparisonResult
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from simulation.order import Order
 from simulation.store import Store
 from simulation.demand import DemandGenerator, DemandGeneratorConfig
 from simulation.assignment_types import AssignmentResult
+from simulation.delivery import precompute_store_distances, StoreDistanceIndex
 from simulation.strategies import AssignmentStrategy, NearestStoreStrategy, OptimizedStrategy
 
 
@@ -74,9 +80,9 @@ class SimulationResult:
 
 @dataclass
 class StrategyComparison:
-    """Head-to-head metrics for one pair of strategies."""
-    strategy_name:    str
-    sla_rate:         float
+    """Head-to-head metrics for one strategy."""
+    strategy_name:     str
+    sla_rate:          float
     avg_delivery_time: float
     store_utilization: Dict[int, float]   # store_id → avg store time (minutes)
 
@@ -86,10 +92,10 @@ class ComparisonResult:
     """
     Output of compare_strategies().
     Contains one StrategyComparison per strategy run, in the same order
-    they were passed in. Full SimulationResults are also kept for deep dives.
+    they were passed in.  Full SimulationResults are kept for deep dives.
     """
-    comparisons:        List[StrategyComparison]
-    full_results:       List[SimulationResult]
+    comparisons:  List[StrategyComparison]
+    full_results: List[SimulationResult]
 
     def best_sla(self) -> StrategyComparison:
         """Return the strategy with the highest SLA rate."""
@@ -108,9 +114,18 @@ class SimulationEngine:
     """
     Orchestrates one complete simulation run for a given strategy.
 
+    On construction the engine:
+      1. Precomputes road-network distances from every store node to all
+         reachable graph nodes (single-source Dijkstra, done once).
+      2. Injects the resulting StoreDistanceIndex into the strategy.
+
+    The order-processing loop then calls strategy.select_store() per order
+    with O(1) distance lookups.
+
     Args:
         config:        Master SimConfig.
-        stores:        Pre-built Store objects (will be mutated during run).
+        stores:        Pre-built Store objects (mutated during run).
+        graph:         OSMnx MultiDiGraph — required for road-network mode.
         strategy:      Assignment strategy. Defaults to OptimizedStrategy.
         demand_config: Optional demand override (e.g. from Streamlit UI).
     """
@@ -119,25 +134,36 @@ class SimulationEngine:
         self,
         config:        SimConfig,
         stores:        List[Store],
+        graph:         object,
         strategy:      AssignmentStrategy | None = None,
         demand_config: DemandGeneratorConfig | None = None,
-        graph:         object | None = None,
     ) -> None:
         self.config         = config
         self.stores         = stores
-        self.strategy       = strategy or OptimizedStrategy(graph=graph)
+        self._graph         = graph
         self._demand_config = demand_config or DemandGeneratorConfig.from_sim_config(config)
-        self._graph         = graph   # OSMnx graph; None in Euclidean mode
+
+        # --- Precompute distances once ---
+        self._distance_index: StoreDistanceIndex = precompute_store_distances(
+            stores, graph
+        )
+
+        # --- Build / configure strategy ---
+        if strategy is None:
+            strategy = OptimizedStrategy(graph=graph)
+        strategy.set_distance_index(self._distance_index)
+        self.strategy = strategy
 
     def run(self, orders: List[Order] | None = None) -> SimulationResult:
         """
         Execute the simulation and return aggregated metrics.
 
         Args:
-            orders: Pre-generated orders to process. If None, generates
-                    a fresh batch from the demand config. Passing orders
-                    explicitly allows compare_strategies() to run both
-                    strategies on identical demand.
+            orders: Pre-generated orders to process.  If None, a fresh batch
+                    is generated from the demand config.  Passing orders
+                    explicitly lets compare_strategies() run all strategies on
+                    identical demand so results differ only due to assignment
+                    decisions.
         """
         if orders is None:
             orders = DemandGenerator(self._demand_config).generate()
@@ -171,7 +197,6 @@ class SimulationEngine:
         order.ready_time     = order.arrival_time + ev.queue_delay + ev.prep_time
         order.delivered_time = order.ready_time + ev.travel_time
 
-        # Drain workload to current time and commit new order atomically
         result.selected_store.commit(order, order.arrival_time)
 
         m.orders_assigned   += 1
@@ -188,8 +213,11 @@ class SimulationEngine:
     ) -> SimulationResult:
         total        = len(orders)
         sla_met      = sum(1 for r in assignment_results if r.evaluation.meets_sla_target)
-        avg_delivery = float(np.mean([r.evaluation.expected_total for r in assignment_results])) if assignment_results else 0.0
-        feasible     = sum(1 for r in assignment_results if r.feasible)
+        avg_delivery = (
+            float(np.mean([r.evaluation.expected_total for r in assignment_results]))
+            if assignment_results else 0.0
+        )
+        feasible = sum(1 for r in assignment_results if r.feasible)
 
         return SimulationResult(
             strategy_name      = self.strategy.name,
@@ -208,8 +236,8 @@ class SimulationEngine:
 # Public helpers
 # ---------------------------------------------------------------------------
 
-def _build_stores(config: SimConfig, locations: List[tuple[float, float]]) -> List[Store]:
-    """Construct a fresh list of Store objects from coordinate pairs."""
+def _build_stores(config: SimConfig, locations: List[tuple]) -> List[Store]:
+    """Construct a fresh list of Store objects from (lat, lon) pairs."""
     return [
         Store(id=i, location=loc, prep_config=config.prep)
         for i, loc in enumerate(locations)
@@ -218,55 +246,56 @@ def _build_stores(config: SimConfig, locations: List[tuple[float, float]]) -> Li
 
 def run_simulation(
     config:          SimConfig,
-    store_locations: List[tuple[float, float]],
+    store_locations: List[tuple],
+    graph:           object,
     strategy:        AssignmentStrategy | None = None,
     demand_config:   DemandGeneratorConfig | None = None,
-    graph:           object | None = None,
 ) -> SimulationResult:
     """
     Build stores and run one simulation with the given strategy.
 
     Args:
         config:           Master SimConfig.
-        store_locations:  (x, y) coordinates for each store.
+        store_locations:  (lat, lon) coordinates for each store.
+        graph:            OSMnx MultiDiGraph (required).
         strategy:         Assignment strategy. Defaults to OptimizedStrategy.
         demand_config:    Optional demand override (UI-supplied).
-        graph:            OSMnx MultiDiGraph for road-network mode. None = Euclidean.
 
     Example::
 
-        result = run_simulation(SimConfig(), [(2.0, 3.0), (7.0, 8.0)])
+        result = run_simulation(SimConfig(), [(28.54, 77.39), (28.53, 77.40)], G)
         print(result.sla_rate, result.strategy_name)
     """
     stores = _build_stores(config, store_locations)
     return SimulationEngine(
         config        = config,
         stores        = stores,
+        graph         = graph,
         strategy      = strategy,
         demand_config = demand_config,
-        graph         = graph,
     ).run()
 
 
 def compare_strategies(
     config:          SimConfig,
-    store_locations: List[tuple[float, float]],
+    store_locations: List[tuple],
+    graph:           object,
     strategies:      List[AssignmentStrategy] | None = None,
     demand_config:   DemandGeneratorConfig | None = None,
-    graph:           object | None = None,
 ) -> ComparisonResult:
     """
-    Run the simulation once per strategy on identical demand, then
-    return side-by-side comparison metrics.
+    Run the simulation once per strategy on identical demand, then return
+    side-by-side comparison metrics.
 
     Both strategies see the same generated orders so results differ only
     due to assignment decisions, not demand randomness.
 
     Args:
         config:           Master SimConfig.
-        store_locations:  (x, y) coordinates for each store.
-        strategies:       List of strategy objects to compare.
-                          Defaults to [NearestStoreStrategy(), OptimizedStrategy()].
+        store_locations:  (lat, lon) coordinates for each store.
+        graph:            OSMnx MultiDiGraph (required).
+        strategies:       Strategies to compare.  Defaults to
+                          [NearestStoreStrategy(graph), OptimizedStrategy(graph)].
         demand_config:    Optional demand override (UI-supplied).
 
     Returns:
@@ -275,7 +304,7 @@ def compare_strategies(
 
     Example::
 
-        result = compare_strategies(SimConfig(), [(2.0, 2.0), (8.0, 8.0)])
+        result = compare_strategies(SimConfig(), [(28.54, 77.39), (28.53, 77.40)], G)
         print(result.best_sla().strategy_name)
         print(result.best_speed().strategy_name)
     """
@@ -283,18 +312,22 @@ def compare_strategies(
         strategies = [NearestStoreStrategy(graph=graph), OptimizedStrategy(graph=graph)]
 
     # Generate demand once — shared across all strategy runs
-    demand_cfg  = demand_config or DemandGeneratorConfig.from_sim_config(config)
+    demand_cfg    = demand_config or DemandGeneratorConfig.from_sim_config(config)
     shared_orders = DemandGenerator(demand_cfg).generate()
 
     full_results: List[SimulationResult] = []
 
     for strategy in strategies:
-        # Each strategy gets its own fresh stores (clean workload state)
-        stores  = _build_stores(config, store_locations)
-        # Deep-copy orders so timestamp fields don't bleed across runs
-        orders  = copy.deepcopy(shared_orders)
-        engine  = SimulationEngine(config=config, stores=stores, strategy=strategy, graph=graph)
-        result  = engine.run(orders=orders)
+        stores = _build_stores(config, store_locations)
+        orders = copy.deepcopy(shared_orders)
+        engine = SimulationEngine(
+            config        = config,
+            stores        = stores,
+            graph         = graph,
+            strategy      = strategy,
+            demand_config = demand_cfg,
+        )
+        result = engine.run(orders=orders)
         full_results.append(result)
 
     comparisons = [

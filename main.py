@@ -1,25 +1,23 @@
 """
 main.py
 -------
-Runs a strategy comparison using real road-network demand.
+Runs a strategy comparison using real road-network demand,
+then renders a side-by-side map comparison.
 """
 
 from config import SimConfig
 from simulation.demand import DemandGeneratorConfig
 from simulation.engine import compare_strategies
 from geo.map_loader import load_city_graph
-
+from visualization.map_viz import show_comparison
 
 def main() -> None:
     # --- Config ---
     config = SimConfig()
     config.simulation.time_horizon_minutes = 180.0
-    config.demand.poisson_lambda           = 0.6
+    config.demand.poisson_lambda           = 1.5
     config.sla.max_delivery_minutes        = 30.0
     config.sla.probability_threshold       = 0.95
-
-    # Use real road distances
-    config.delivery.use_network_distance = True
 
     # --- Load map (cached after first run) ---
     print("Loading map...")
@@ -27,25 +25,29 @@ def main() -> None:
 
     # --- Store locations (lat, lon within bounding box) ---
     store_locations = [
-        (28.54, 77.39),
-        (28.53, 77.40),
-        (28.52, 77.38),
+        (28.58, 77.35),
+        (28.57, 77.40),
+        (28.55, 77.34),
+        (28.54, 77.45),
+        (28.52, 77.37),
+        (28.50, 77.43)
     ]
 
     # --- Real-map demand generation ---
     demand_config = DemandGeneratorConfig.from_real_map(
-        graph         = G,
-        arrival_params= {"lam": config.demand.poisson_lambda},
-        time_horizon  = config.simulation.time_horizon_minutes,
-        seed          = config.simulation.random_seed,
+        graph          = G,
+        arrival_params = {"lam": config.demand.poisson_lambda},
+        time_horizon   = config.simulation.time_horizon_minutes,
+        seed           = config.simulation.random_seed,
     )
 
-    # --- Run comparison ---
+    # --- Run comparison (graph is now a required argument) ---
+    print("Precomputing store distances and running simulation...")
     comparison = compare_strategies(
         config          = config,
         store_locations = store_locations,
+        graph           = G,
         demand_config   = demand_config,
-        graph           = G,   # VERY IMPORTANT
     )
 
     # --- Print summary ---
@@ -75,6 +77,15 @@ def main() -> None:
             )
 
     print(f"{'='*52}\n")
+
+    # --- Map visualisation ---
+    print("Rendering comparison map...")
+    show_comparison(
+        comparison      = comparison,
+        graph           = G,
+        store_locations = store_locations,
+        save_path       = "comparison_map.png",   # set to None to display interactively
+    )
 
 
 if __name__ == "__main__":
