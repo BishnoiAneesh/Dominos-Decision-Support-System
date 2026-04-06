@@ -169,8 +169,8 @@ class SimulationEngine:
         order.ready_time     = order.arrival_time + ev.queue_delay + ev.prep_time
         order.delivered_time = order.ready_time + ev.travel_time
 
-        result.selected_store.add_order(order)
-        result.selected_store.complete_order(order)
+        # Drain workload to current time and commit new order atomically
+        result.selected_store.commit(order, order.arrival_time)
 
         m.orders_assigned   += 1
         m.total_queue_delay += ev.queue_delay

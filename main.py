@@ -13,8 +13,8 @@ def main() -> None:
     # --- Config ---
     config = SimConfig()
     config.simulation.time_horizon_minutes = 180.0
-    config.demand.poisson_lambda           = 50.0
-    config.sla.max_delivery_minutes        = 20.0
+    config.demand.poisson_lambda           = 1    
+    config.sla.max_delivery_minutes        = 30.0
     config.sla.probability_threshold       = 0.95
 
     store_locations = [(2.0, 2.0), (5.0, 8.0), (8.0, 3.0)]

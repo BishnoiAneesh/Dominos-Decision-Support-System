@@ -40,7 +40,7 @@ def _full_evaluation(
     assignment_cost is passed in by the calling strategy so each strategy
     can use its own objective without duplicating the pipeline logic.
     """
-    queue_delay  = store.estimate_queue_delay(order)
+    queue_delay  = store.estimate_queue_delay(order, order.arrival_time)
     prep_time    = store.estimate_prep_time(order)
     delivery_est = estimate_delivery_time(
         origin         = store.location,
