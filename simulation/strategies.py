@@ -105,15 +105,32 @@ def _road_distance_km(
     store_node_distances: StoreDistanceIndex,
 ) -> float:
     """
-    O(1) road-network distance lookup (km) from a store to an order location.
+    Road-network distance (km) from a store to an order location.
 
-    Uses the precomputed Dijkstra index — no shortest-path query at call time.
+    Precompute mode: O(1) lookup from the full node-distance dict.
+    Real-time mode:  on-the-fly Dijkstra using the stored node id.
     """
-    dest_node  = _nearest_node(graph, order.location[0], order.location[1])
-    node_dists = store_node_distances.get(store.id, {})
-    distance_m = node_dists.get(dest_node)
-    if distance_m is None:
-        distance_m = max(node_dists.values()) if node_dists else 0.0
+    dest_node = _nearest_node(graph, order.location[0], order.location[1])
+
+    if store.id in store_node_distances:
+        # Precompute mode
+        node_dists = store_node_distances[store.id]
+        distance_m = node_dists.get(dest_node)
+        if distance_m is None:
+            distance_m = max(node_dists.values()) if node_dists else 0.0
+    else:
+        # Real-time mode: use stored node id and run targeted Dijkstra
+        import networkx as nx
+        store_node = store_node_distances.get(f"_node_{store.id}")
+        if store_node is None:
+            return 0.0
+        try:
+            distance_m, _ = nx.single_source_dijkstra(
+                graph, store_node, dest_node, weight="length"
+            )
+        except Exception:
+            distance_m = 0.0
+
     return distance_m / 1000.0
 
 

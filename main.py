@@ -3,6 +3,12 @@ main.py
 -------
 Runs a strategy comparison using real road-network demand,
 then renders a side-by-side map comparison.
+
+Execution mode
+--------------
+Set EXEC_MODE to control routing behaviour:
+  "precompute"  ("Fast runtime")  — Dijkstra runs once per store up-front.
+  "direct"      ("Real-time")     — Dijkstra runs per order inside the loop.
 """
 
 from config import SimConfig
@@ -10,6 +16,14 @@ from simulation.demand import DemandGeneratorConfig
 from simulation.engine import compare_strategies
 from geo.map_loader import load_city_graph
 from visualization.map_viz import show_comparison
+from geo.geo_constants import MAP_BOUNDS, MAP_NORTH, MAP_SOUTH, MAP_EAST, MAP_WEST
+
+
+# ---------------------------------------------------------------------------
+# Execution mode: "precompute" (fast) | "direct" (real-time)
+# ---------------------------------------------------------------------------
+EXEC_MODE = "direct"
+
 
 def main() -> None:
     # --- Config ---
@@ -23,15 +37,25 @@ def main() -> None:
     print("Loading map...")
     G = load_city_graph()
 
-    # --- Store locations (lat, lon within bounding box) ---
+    # --- Store locations (lat, lon) — must be within MAP_BOUNDS ---
     store_locations = [
-        (28.58, 77.35),
-        (28.57, 77.40),
-        (28.55, 77.34),
-        (28.54, 77.45),
-        (28.52, 77.37),
-        (28.50, 77.43)
+        (28.5598, 77.3712),
+        (28.5553, 77.4076),
+        (28.5366, 77.4083),
+        (28.5381, 77.3678),
+        (28.5158, 77.3753),
+        (28.5176, 77.4076)
     ]
+
+    # Validate all stores fall within the shared bounding box
+    invalid = [
+        loc for loc in store_locations
+        if not (MAP_SOUTH <= loc[0] <= MAP_NORTH and MAP_WEST <= loc[1] <= MAP_EAST)
+    ]
+    if invalid:
+        raise ValueError(
+            f"Store location(s) outside map bounds {MAP_BOUNDS}: {invalid}"
+        )
 
     # --- Real-map demand generation ---
     demand_config = DemandGeneratorConfig.from_real_map(
@@ -41,19 +65,24 @@ def main() -> None:
         seed           = config.simulation.random_seed,
     )
 
-    # --- Run comparison (graph is now a required argument) ---
-    print("Precomputing store distances and running simulation...")
+    precompute = (EXEC_MODE == "precompute")
+    mode_label = "Fast runtime (precompute)" if precompute else "Real-time (direct Dijkstra)"
+    print(f"Execution mode: {mode_label}")
+
+    # --- Run comparison ---
+    print("Running simulation...")
     comparison = compare_strategies(
         config          = config,
         store_locations = store_locations,
         graph           = G,
         demand_config   = demand_config,
+        precompute      = precompute,
     )
 
     # --- Print summary ---
     total_orders = comparison.full_results[0].total_orders
     print(f"\n{'='*52}")
-    print(f"  STRATEGY COMPARISON  ({total_orders} orders)")
+    print(f"  STRATEGY COMPARISON  ({total_orders} orders)  [{mode_label}]")
     print(f"{'='*52}")
     print(f"  {'Strategy':<22} {'SLA Rate':>9} {'Avg Time':>10}")
     print(f"  {'-'*46}")

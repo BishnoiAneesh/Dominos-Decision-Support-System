@@ -7,10 +7,6 @@ Renders:
   • Road network (OSMnx graph edges)
   • Store locations (star markers)
   • Order locations colour-coded by delivery outcome:
-        Blue   — order created / undelivered
-        Green  — delivered in < 25 min
-        Yellow — delivered in 25–30 min
-        Red    — delivered in > 30 min
 
 Public API
 ----------

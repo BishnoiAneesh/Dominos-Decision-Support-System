@@ -129,6 +129,33 @@ def precompute_store_distances(
     return index
 
 
+def build_realtime_node_index(
+    stores: list,
+    graph:  object,
+) -> StoreDistanceIndex:
+    """
+    Build a lightweight index for real-time (on-the-fly Dijkstra) mode.
+
+    Instead of storing full node→distance dicts, stores only the nearest
+    road node id for each store, keyed as ``"_node_<store_id>"``.
+    ``estimate_delivery_time()`` reads these keys when ``origin_store_id``
+    is absent from the index (real-time mode).
+
+    Args:
+        stores: List of Store objects.
+        graph:  OSMnx MultiDiGraph.
+
+    Returns:
+        Dict with entries like ``{"_node_0": 12345, "_node_1": 67890, …}``
+    """
+    index: StoreDistanceIndex = {}
+    for store in stores:
+        lat, lon   = store.location
+        store_node = _nearest_node(graph, lat, lon)
+        index[f"_node_{store.id}"] = store_node  # type: ignore[assignment]
+    return index
+
+
 # ---------------------------------------------------------------------------
 # Core estimator
 # ---------------------------------------------------------------------------
@@ -166,13 +193,43 @@ def estimate_delivery_time(
         disconnected), the maximum known distance for that store is used as a
         conservative upper bound so the simulation degrades gracefully.
     """
-    dest_node  = _nearest_node(graph, destination[0], destination[1])
-    node_dists = store_node_distances[origin_store_id]
+    dest_node = _nearest_node(graph, destination[0], destination[1])
 
-    distance_m = node_dists.get(dest_node)
-    if distance_m is None:
-        # Conservative fallback for disconnected nodes
-        distance_m = max(node_dists.values()) if node_dists else 0.0
+    if origin_store_id in store_node_distances:
+        # Precompute mode: O(1) dict lookup
+        node_dists = store_node_distances[origin_store_id]
+        distance_m = node_dists.get(dest_node)
+        if distance_m is None:
+            # Disconnected node fallback
+            distance_m = max(node_dists.values()) if node_dists else 0.0
+    else:
+        # Real-time mode: on-the-fly Dijkstra from store node to dest node
+        try:
+            import networkx as nx
+        except ImportError as exc:
+            raise ImportError("NetworkX is required for real-time routing.") from exc
+        store_node = store_node_distances.get("_node_" + str(origin_store_id))
+        if store_node is None:
+            raise KeyError(
+                f"Real-time mode: store {origin_store_id} has no cached node id. "
+                "Pass store_node_distances from _build_realtime_node_index()."
+            )
+        try:
+            length, _ = nx.single_source_dijkstra(
+                graph, store_node, dest_node, weight="length"
+            )
+            distance_m = length
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            # Disconnected graph fallback: straight-line approximation
+            import math
+            store_lat = graph.nodes[store_node]["y"]
+            store_lon = graph.nodes[store_node]["x"]
+            dest_lat, dest_lon = destination
+            dlat = math.radians(dest_lat - store_lat)
+            dlon = math.radians(dest_lon - store_lon)
+            a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(store_lat)) * \
+                math.cos(math.radians(dest_lat)) * math.sin(dlon / 2) ** 2
+            distance_m = 6_371_000 * 2 * math.asin(math.sqrt(a))
 
     distance_km = distance_m / 1000.0
     speed_kmpm  = delivery_cfg.average_speed_kmph / 60.0

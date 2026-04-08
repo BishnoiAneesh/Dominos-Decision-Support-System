@@ -20,23 +20,27 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from shapely.geometry import box
+
+from geo.geo_constants import MAP_LAT, MAP_LON, MAP_DIST, MAP_NORTH, MAP_SOUTH, MAP_EAST, MAP_WEST
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Geography constants
+# Geography constants (imported from geo_constants — do not duplicate here)
 # ---------------------------------------------------------------------------
 
-LAT    = 28.5355
-LON    = 77.3910
-DIST   = 0.07          # ≈ 7.8 km per degree latitude → ~15 km box side
+LAT   = MAP_LAT
+LON   = MAP_LON
+DIST  = MAP_DIST
+G_Distance = MAP_DIST * 1000
 
-NORTH  = LAT + DIST
-SOUTH  = LAT - DIST
-EAST   = LON + DIST
-WEST   = LON - DIST
+NORTH = MAP_NORTH
+SOUTH = MAP_SOUTH
+EAST  = MAP_EAST
+WEST  = MAP_WEST
 
-GRAPHML_PATH = "delhi_15km.graphml"
+GRAPHML_PATH = f"graph_{LAT}_{LON}_{DIST}.graphml"
 
 # ---------------------------------------------------------------------------
 # Module-level cache — graph loaded at most once per process
@@ -46,6 +50,12 @@ _GRAPH_CACHE: Any | None = None
 
 
 def load_city_graph(path: str = GRAPHML_PATH) -> Any:
+    print("NORTH:", NORTH)
+    print("SOUTH:", SOUTH)
+    print("EAST:", EAST)
+    print("WEST:", WEST)
+    print("DELTA LAT:", NORTH - SOUTH)
+    print("DELTA LON:", EAST - WEST)
     """
     Return the drivable road-network graph for the configured bounding box.
 
@@ -83,11 +93,13 @@ def load_city_graph(path: str = GRAPHML_PATH) -> Any:
             "Downloading road graph (bbox: N=%.4f S=%.4f E=%.4f W=%.4f) …",
             NORTH, SOUTH, EAST, WEST,
         )
-        G = ox.graph_from_point(
-        (LAT, LON),
-        dist=7000,  # meters (~15 km area)
-        network_type="drive",
+        polygon = box(MAP_WEST, MAP_SOUTH, MAP_EAST, MAP_NORTH)
+
+        G = ox.graph_from_polygon(
+            polygon,
+            network_type="drive",
         )
+
         ox.save_graphml(G, path)
         logger.info("Road graph saved to %s", path)
 
