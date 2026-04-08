@@ -260,16 +260,16 @@ with st.sidebar:
     st.subheader("⚡ Execution Mode")
     exec_mode_label = st.radio(
         "Routing strategy",
-        options=["Fast runtime", "Real-time"],
+        options=["Preconfigure Dijkstra - Slow Prep, Fast simulation", "Real-time Dijkstra - Fast Prep, Slow simulation"],
         index=0,
         help=(
-            "**Fast runtime** — precomputes all store→node distances before the "
-            "simulation loop (Dijkstra once per store). Best for most runs.\n\n"
-            "**Real-time** — runs Dijkstra on-the-fly per order. Slower but "
+            "**Preconfigure Dijkstra** — precomputes all store→node distances before the "
+            "simulation loop (Dijkstra once per store). Best for long runs.\n\n"
+            "**Real-time Dijkstra** — runs Dijkstra on-the-fly per order. Slower but "
             "avoids the upfront precomputation cost."
         ),
     )
-    exec_mode = "precompute" if exec_mode_label == "Fast runtime" else "direct"
+    exec_mode = "precompute" if exec_mode_label == "Preconfigure Dijkstra - Slow Prep, Fast simulation" else "direct"
     st.session_state.exec_mode = exec_mode
 
     st.divider()
