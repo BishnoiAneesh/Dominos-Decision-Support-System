@@ -40,7 +40,7 @@ Built with Streamlit for real-time decision support:
 
 - 📍 Add stores dynamically on map  
 - ⚙️ Configure demand & SLA  
-- 📊 Live simulation updates  
+- 📊 Live simulation updates (currently disabled for performance) 
 - 🗺️ Visual delivery tracking  
 
 ### Map Legend
