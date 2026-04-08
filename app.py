@@ -84,8 +84,29 @@ def _add_boundary_rect(fmap: folium.Map) -> None:
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading road network graph…")
 def _load_graph():
+    import os
+    import osmnx as ox
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    graph_filename = "graph_28.5355_77.391_0.03.graphml"
+    graph_path = os.path.join(BASE_DIR, graph_filename)
+
+    # ✅ Case 1: Load from file if exists
+    if os.path.exists(graph_path):
+        print("✅ Loading graph from file")
+        return ox.load_graphml(graph_path)
+
+    # ⚡ Case 2: Generate and save
+    print("⚠️ Graph not found. Generating new graph...")
     from geo.map_loader import load_city_graph
-    return load_city_graph()
+    G = load_city_graph()
+
+    try:
+        ox.save_graphml(G, graph_path)
+        print(f"💾 Graph saved to {graph_path}")
+    except Exception as e:
+        print(f"❌ Failed to save graph: {e}")
+
+    return G
 
 
 # ---------------------------------------------------------------------------
