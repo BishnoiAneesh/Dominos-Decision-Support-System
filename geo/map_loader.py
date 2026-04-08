@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 LAT   = MAP_LAT
 LON   = MAP_LON
 DIST  = MAP_DIST
-G_Distance = MAP_DIST * 1000
 
 NORTH = MAP_NORTH
 SOUTH = MAP_SOUTH
