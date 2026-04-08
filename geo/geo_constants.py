@@ -15,7 +15,7 @@ demand should import from here rather than hard-coding lat/lon values.
 MAP_LAT  = 28.5355
 MAP_LON  = 77.3910
 
-# Half-extent in degrees (~7 km per 0.07°lat → ~15 km bounding box)
+# Half-extent in degrees (0.01° → ~1.1 km bounding box, towards 4 directions)
 MAP_DIST = 0.03
 
 # Derived bounding box — use these everywhere
