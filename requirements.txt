@@ -7,3 +7,4 @@ geopandas
 shapely
 folium
 streamlit-folium
+scipy
