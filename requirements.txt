@@ -8,3 +8,4 @@ shapely
 folium
 streamlit-folium
 scipy
+scikit-learn
