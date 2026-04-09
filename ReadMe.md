@@ -13,6 +13,8 @@ This project simulates a city-scale delivery network where:
 - 🚚 Delivery time is stochastic (real-world uncertainty)
 - 🧠 Orders are assigned using intelligent strategies
 
+Deployed @ https://dominos-adms-aneesh.streamlit.app/
+
 Sample Outcome
 <img width="1239" height="578" alt="image" src="https://github.com/user-attachments/assets/c3379433-f4bc-4a54-b10b-1025e2ac5720" />
 
